@@ -1,0 +1,19 @@
+{
+  "command.connect": "SSH: 连接",
+  "command.disconnect": "SSH: 断开连接",
+  "command.addConnection": "SSH: 添加连接",
+  "command.refresh": "SSH: 刷新",
+  "command.uploadFile": "SSH: 上传文件",
+  "command.uploadFolder": "SSH: 上传文件夹",
+  "command.uploadFileOrFolder": "SSH: 上传到远程",
+  "command.downloadFile": "SSH: 下载文件",
+  "command.deleteFile": "SSH: 删除文件/文件夹",
+  "command.rename": "SSH: 重命名",
+  "command.createFolder": "SSH: 创建文件夹",
+  "command.chmodFile": "SSH: 修改权限",
+  "command.openTerminal": "SSH: 打开终端",
+  "command.syncUp": "SSH: 同步本地到远程",
+  "command.syncDown": "SSH: 同步远程到本地",
+  "command.syncDiff": "SSH: 显示同步差异",
+  "command.toggleAutoUpload": "SSH: 切换保存时自动上传"
+}

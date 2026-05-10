@@ -1,0 +1,10 @@
+.vscode/**
+.vscode-test/**
+src/**
+tsconfig.json
+webpack.config.js
+.eslintrc.json
+tests/**
+.gitignore
+.gitattributes
+.github/**

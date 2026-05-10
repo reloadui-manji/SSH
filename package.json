@@ -1,0 +1,308 @@
+{
+  "name": "ssh-sftp-fs",
+  "displayName": "SSH/SFTP Remote Explorer",
+  "description": "SSH/SFTP file browser, editor, sync and terminal integration for VS Code",
+  "version": "0.1.0",
+  "publisher": "manji",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:sshExplorer",
+    "onFileSystem:ssh",
+    "onCommand:ssh.connect",
+    "workspaceContains:**/.ssh-sync.json",
+    "*"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ssh-explorer",
+          "title": "SSH/SFTP Explorer",
+          "icon": "resources/icons/folder.svg"
+        }
+      ]
+    },
+    "views": {
+      "ssh-explorer": [
+        {
+          "id": "sshExplorer",
+          "name": "Remote Explorer"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ssh.connect",
+        "title": "%command.connect%",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "ssh.disconnect",
+        "title": "%command.disconnect%",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "ssh.addConnection",
+        "title": "%command.addConnection%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ssh.refresh",
+        "title": "%command.refresh%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ssh.uploadFile",
+        "title": "%command.uploadFile%",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "ssh.uploadFolder",
+        "title": "%command.uploadFolder%",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "ssh.uploadFileOrFolder",
+        "title": "%command.uploadFileOrFolder%",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "ssh.downloadFile",
+        "title": "%command.downloadFile%",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "ssh.deleteFile",
+        "title": "%command.deleteFile%",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "ssh.renameFile",
+        "title": "%command.rename%",
+        "icon": "$(symbol-keyword)"
+      },
+      {
+        "command": "ssh.createFolder",
+        "title": "%command.createFolder%",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "ssh.chmodFile",
+        "title": "%command.chmodFile%",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "ssh.openTerminal",
+        "title": "%command.openTerminal%",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "ssh.syncUp",
+        "title": "%command.syncUp%",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "ssh.syncDown",
+        "title": "%command.syncDown%",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "ssh.syncDiff",
+        "title": "%command.syncDiff%",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "ssh.toggleAutoUpload",
+        "title": "SSH: Toggle Auto Upload on Save",
+        "icon": "$(sync)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ssh.refresh",
+          "when": "view == sshExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "ssh.addConnection",
+          "when": "view == sshExplorer",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ssh.connect",
+          "when": "view == sshExplorer && viewItem =~ /connection-disconnected/",
+          "group": "inline"
+        },
+        {
+          "command": "ssh.disconnect",
+          "when": "view == sshExplorer && viewItem == connection-connected",
+          "group": "inline"
+        },
+        {
+          "command": "ssh.openTerminal",
+          "when": "view == sshExplorer && viewItem == connection-connected",
+          "group": "navigation"
+        },
+        {
+          "command": "ssh.uploadFile",
+          "when": "view == sshExplorer && viewItem == connection-connected",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ssh.uploadFolder",
+          "when": "view == sshExplorer && viewItem == connection-connected",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ssh.uploadFile",
+          "when": "view == sshExplorer && viewItem == directory",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ssh.uploadFolder",
+          "when": "view == sshExplorer && viewItem == directory",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ssh.downloadFile",
+          "when": "view == sshExplorer && viewItem == file",
+          "group": "navigation"
+        },
+        {
+          "command": "ssh.deleteFile",
+          "when": "view == sshExplorer && viewItem =~ /^(file|directory)$/",
+          "group": "2_modification"
+        },
+        {
+          "command": "ssh.renameFile",
+          "when": "view == sshExplorer && viewItem =~ /^(file|directory)$/",
+          "group": "2_modification"
+        },
+        {
+          "command": "ssh.createFolder",
+          "when": "view == sshExplorer && viewItem == directory",
+          "group": "2_modification"
+        },
+        {
+          "command": "ssh.chmodFile",
+          "when": "view == sshExplorer && viewItem =~ /^(file|directory)$/",
+          "group": "2_modification"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "ssh.uploadFileOrFolder"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SSH/SFTP",
+      "properties": {
+        "ssh.connections": {
+          "type": "array",
+          "default": [],
+          "description": "Manual connection profiles"
+        },
+        "ssh.autoUpload": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-upload file on save"
+        },
+        "ssh.autoUploadDelay": {
+          "type": "number",
+          "default": 500,
+          "description": "Debounce delay in milliseconds before auto-upload"
+        },
+        "ssh.watchExtensions": {
+          "type": "array",
+          "default": [
+            "*"
+          ],
+          "description": "File extensions to watch for auto-upload"
+        },
+        "ssh.ignorePatterns": {
+          "type": "array",
+          "default": [
+            ".git",
+            "node_modules",
+            ".vscode",
+            ".ssh-sync.json"
+          ],
+          "description": "Glob patterns to exclude from sync"
+        },
+        "ssh.defaultProtocol": {
+          "type": "string",
+          "enum": [
+            "sftp",
+            "scp"
+          ],
+          "default": "sftp",
+          "description": "Default transfer protocol"
+        },
+        "ssh.configPath": {
+          "type": "string",
+          "default": "~/.ssh/config",
+          "description": "Path to SSH config file"
+        },
+        "ssh.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show connection status in status bar"
+        },
+        "ssh.remotePath": {
+          "type": "string",
+          "default": "",
+          "description": "Default remote root path"
+        },
+        "ssh.concurrency": {
+          "type": "number",
+          "default": 4,
+          "description": "Number of parallel file transfers"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "webpack --mode production",
+    "build:dev": "webpack --mode development",
+    "watch": "webpack --mode development --watch",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test",
+    "test:unit": "mocha --require ts-node/register tests/unit/**/*.test.ts",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.7",
+    "@types/node": "^20.14.0",
+    "@types/ssh2": "^1.15.1",
+    "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^3.2.0",
+    "chai": "^5.1.0",
+    "eslint": "^9.12.0",
+    "mocha": "^10.7.0",
+    "node-loader": "^2.1.0",
+    "ts-loader": "^9.5.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0",
+    "webpack": "^5.94.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "ssh-config": "^5.0.0",
+    "ssh2": "^1.16.0",
+    "ssh2-sftp-client": "^11.0.0"
+  }
+}
