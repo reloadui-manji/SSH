@@ -1,5 +1,7 @@
+import * as vscode from 'vscode';
 import { Client, SFTPWrapper, Channel } from 'ssh2';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { ConnectionProfile, ConnectionStatus, Protocol } from './protocol';
 import { Logger } from '../utils/logger';
@@ -51,6 +53,53 @@ export class SshConnection {
   async connect(): Promise<void> {
     this.setStatus(ConnectionStatus.Connecting);
 
+    // If using an encrypted private key without a passphrase, prompt the user
+    const auth = this.profile.auth;
+    if (auth.type === 'privateKey' && !auth.passphrase) {
+      let keyData: Buffer | undefined;
+      let keyPath: string | undefined;
+      if (auth.privateKey) {
+        keyData = Buffer.from(auth.privateKey);
+      } else if (auth.privateKeyPath) {
+        try {
+          keyData = fs.readFileSync(auth.privateKeyPath);
+          keyPath = auth.privateKeyPath;
+        } catch {}
+      }
+      if (keyData && this.isKeyEncrypted(keyData)) {
+        // Check for a saved passphrase first
+        const savedPassphrases = vscode.workspace.getConfiguration('ssh').get<Record<string, string>>('keyPassphrases', {});
+        const savedPassphrase = keyPath ? savedPassphrases[keyPath] : undefined;
+
+        if (savedPassphrase) {
+          (this.profile.auth as any).passphrase = savedPassphrase;
+          this.logger.info('Using saved passphrase for encrypted key');
+        } else {
+          const passphrase = await vscode.window.showInputBox({
+            prompt: `Enter passphrase for ${keyPath || 'private key'} (will be saved)`,
+            password: true,
+            ignoreFocusOut: true,
+            placeHolder: 'SSH key passphrase (leave empty to use SSH agent)',
+          });
+          if (passphrase) {
+            (this.profile.auth as any).passphrase = passphrase;
+            // Save passphrase for future connections
+            if (keyPath) {
+              savedPassphrases[keyPath] = passphrase;
+              await vscode.workspace.getConfiguration('ssh').update(
+                'keyPassphrases',
+                savedPassphrases,
+                vscode.ConfigurationTarget.Global,
+              );
+              this.logger.info(`Passphrase saved for ${keyPath}`);
+            }
+          } else {
+            this.logger.info('User cancelled passphrase prompt, will try SSH agent');
+          }
+        }
+      }
+    }
+
     return new Promise((resolve, reject) => {
       const timeout = this.profile.connectTimeout || 10000;
       const timer = setTimeout(() => {
@@ -69,8 +118,10 @@ export class SshConnection {
       this.client.once('error', (err) => {
         clearTimeout(timer);
         this.setStatus(ConnectionStatus.Error);
-        this.onError?.(err instanceof Error ? err : new Error(String(err)));
-        reject(err);
+        const wrappedErr = err instanceof Error ? err : new Error(String(err));
+        this.logger.error(`Connection error for ${this.profile.name}: ${wrappedErr.message} (level: ${(err as any).level || 'unknown'}, auth: ${this.profile.auth.type})`);
+        this.onError?.(wrappedErr);
+        reject(wrappedErr);
       });
 
       this.client.once('close', () => {
@@ -89,6 +140,48 @@ export class SshConnection {
       };
 
       this.applyAuth(connectConfig);
+
+      // Register keyboard-interactive handler for tryKeyboard fallback
+      this.client.on('keyboard-interactive', async (name, instructions, _instructionsLang, prompts, finish) => {
+        this.logger.info(`Keyboard-interactive: name="${name}", instructions="${instructions}", ${prompts.length} prompt(s)`);
+        const responses: string[] = [];
+        for (let i = 0; i < prompts.length; i++) {
+          const prompt = prompts[i];
+          // If we have a stored password and this is a password prompt, use it
+          if (this.profile.auth.type === 'password' && this.profile.auth.password && !prompt.echo) {
+            responses.push(this.profile.auth.password);
+            this.logger.info(`Keyboard-interactive: auto-responded to prompt "${prompt.prompt}" with stored password`);
+          } else {
+            const response = await vscode.window.showInputBox({
+              prompt: `${name}: ${prompt.prompt}`,
+              password: !prompt.echo,
+              placeHolder: prompt.prompt,
+              ignoreFocusOut: true,
+            });
+            if (response === undefined) {
+              this.logger.warn('Keyboard-interactive: user cancelled prompt');
+              finish([]);
+              return;
+            }
+            responses.push(response);
+          }
+        }
+        finish(responses);
+      });
+
+      const authMethods: string[] = [];
+      if (connectConfig.password) authMethods.push('password');
+      if (connectConfig.privateKey) authMethods.push('privateKey');
+      if (connectConfig.agent) authMethods.push('agent');
+      if (connectConfig.passphrase) authMethods.push('passphrase');
+      if (connectConfig.tryKeyboard) authMethods.push('tryKeyboard');
+      this.logger.info(
+        `Connecting to ${this.profile.name} (${this.profile.host}:${this.profile.port}) ` +
+        `as ${this.profile.username} · auth type: ${this.profile.auth.type} · ` +
+        `configured methods: [${authMethods.join(', ') || 'none'}] · ` +
+        `SSH_AUTH_SOCK: ${process.env.SSH_AUTH_SOCK ? 'set' : 'not set'}`,
+      );
+
       this.client.connect(connectConfig);
     });
   }
@@ -168,7 +261,12 @@ export class SshConnection {
       });
     };
 
-    await this.uploadDirectoryRecursive(localDir, remoteDir, reportProgress, () => { uploadedFiles++; });
+    try {
+      await this.uploadDirectoryRecursive(localDir, remoteDir, reportProgress, () => { uploadedFiles++; });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`Upload directory failed: ${localDir} -> ${remoteDir}: ${detail}`);
+    }
 
     onProgress?.({ bytesTransferred: uploadedFiles, totalBytes: totalFiles, percent: 100 });
   }
@@ -181,6 +279,18 @@ export class SshConnection {
       const readStream = fs.createReadStream(localPath);
       const writeStream = sftp.createWriteStream(remotePath);
       let bytesTransferred = 0;
+      let errored = false;
+
+      const handleError = (source: string) => (err: Error) => {
+        if (errored) return;
+        errored = true;
+        const detail = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Upload failed: ${localPath} -> ${remotePath} [${source}]: ${detail}`);
+        reject(new Error(`Upload ${source} error: ${detail}`));
+      };
+
+      readStream.on('error', handleError('read'));
+      writeStream.on('error', handleError('write'));
 
       readStream.on('data', (chunk: string | Buffer) => {
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -196,11 +306,9 @@ export class SshConnection {
         }
       });
 
-      readStream.on('error', reject);
-      writeStream.on('error', reject);
       let resolved = false;
       const complete = () => {
-        if (resolved) return;
+        if (resolved || errored) return;
         resolved = true;
         try {
           onProgress?.({ bytesTransferred: stat.size, totalBytes: stat.size, percent: 100 });
@@ -210,7 +318,7 @@ export class SshConnection {
       writeStream.on('close', complete);
       writeStream.on('finish', complete);
       readStream.on('end', () => writeStream.end());
-      setTimeout(() => { if (!resolved) complete(); }, 10000);
+      setTimeout(() => { if (!resolved && !errored) complete(); }, 10000);
 
       readStream.pipe(writeStream, { end: false });
     });
@@ -253,12 +361,26 @@ export class SshConnection {
 
   async createDirectory(remotePath: string): Promise<void> {
     const sftp = await this.getSftp();
-    return new Promise((resolve, reject) => {
-      sftp.mkdir(remotePath, (err) => {
-        if (err) return reject(err);
-        resolve();
+    const normalized = remotePath.replace(/\/+$/, '').replace(/\/+/g, '/');
+    const segments = normalized.split('/').filter(s => s.length > 0);
+    let current = normalized.startsWith('/') ? '/' : '';
+
+    for (const seg of segments) {
+      current = current === '/' ? `/${seg}` : `${current}/${seg}`;
+      await new Promise<void>((resolve, reject) => {
+        sftp.mkdir(current, (err: any) => {
+          if (!err) return resolve();
+          // SFTP v3 has no FILE_ALREADY_EXISTS code — use stat to check if it's an existing directory
+          sftp.stat(current, (statErr: any) => {
+            if (statErr) {
+              reject(new Error(`mkdir "${current}" failed: ${err.message}`));
+            } else {
+              resolve(); // Directory already exists, not an error
+            }
+          });
+        });
       });
-    });
+    }
   }
 
   async deleteFile(remotePath: string): Promise<void> {
@@ -355,6 +477,15 @@ export class SshConnection {
         });
       });
     });
+  }
+
+  async checkExists(remotePath: string): Promise<boolean> {
+    try {
+      await this.stat(remotePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async stat(remotePath: string): Promise<{ size: number; isDirectory: boolean; isFile: boolean; mtime: number }> {
@@ -455,33 +586,127 @@ export class SshConnection {
     });
   }
 
+  private static readonly DEFAULT_KEY_NAMES = [
+    'id_ed25519',
+    'id_rsa',
+    'id_ecdsa',
+    'id_ecdsa_sk',
+    'id_ed25519_sk',
+    'id_dsa',
+  ];
+
+  private findDefaultKey(): string | undefined {
+    const sshDir = path.join(os.homedir(), '.ssh');
+    for (const name of SshConnection.DEFAULT_KEY_NAMES) {
+      const keyPath = path.join(sshDir, name);
+      if (fs.existsSync(keyPath)) {
+        // Skip .pub files that might match
+        if (fs.statSync(keyPath).isFile()) {
+          this.logger.info(`Found default key: ${keyPath}`);
+          return keyPath;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private isKeyEncrypted(keyData: Buffer): boolean {
+    const header = keyData.toString('utf-8', 0, 200);
+    // Traditional PEM format encrypted keys contain 'ENCRYPTED' in the header
+    if (header.includes('ENCRYPTED')) {
+      this.logger.info('Key detection: traditional PEM encrypted key (contains ENCRYPTED header)');
+      return true;
+    }
+    // OpenSSH format keys: use ssh2's parseKey to check if a passphrase is needed
+    if (header.includes('BEGIN OPENSSH PRIVATE KEY')) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { parseKey } = require('ssh2');
+        const result = parseKey(keyData);
+        const isEncrypted = result instanceof Error;
+        this.logger.info(`Key detection: OpenSSH format key, encrypted=${isEncrypted}${isEncrypted ? ` (${result.message})` : ''}`);
+        return isEncrypted;
+      } catch (e: any) {
+        this.logger.warn(`Key detection: OpenSSH parse failed, assuming encrypted: ${e.message}`);
+        return true;
+      }
+    }
+    this.logger.info('Key detection: unencrypted key (PEM format without ENCRYPTED header)');
+    return false;
+  }
+
   private applyAuth(config: Parameters<Client['connect']>[0]): void {
     const auth = this.profile.auth;
 
     switch (auth.type) {
       case 'password':
         config.password = auth.password;
+        config.tryKeyboard = true;
+        this.logger.info(`Auth: password method${auth.password ? ' (password set + tryKeyboard)' : ' (no password provided!)'}`);
         break;
-      case 'privateKey':
+      case 'privateKey': {
+        let keyData: Buffer | undefined;
         if (auth.privateKey) {
+          keyData = Buffer.from(auth.privateKey);
           config.privateKey = auth.privateKey;
+          this.logger.info('Auth: using inline privateKey');
         } else if (auth.privateKeyPath) {
-          config.privateKey = fs.readFileSync(auth.privateKeyPath);
+          try {
+            keyData = fs.readFileSync(auth.privateKeyPath);
+            config.privateKey = keyData;
+            this.logger.info(`Auth: read privateKey from ${auth.privateKeyPath} (${keyData.length} bytes)`);
+          } catch (e: any) {
+            this.logger.error(`Auth: failed to read privateKey from ${auth.privateKeyPath}: ${e.message}`);
+          }
+        } else {
+          // No key configured: search for default SSH keys (~/.ssh/id_ed25519, id_rsa, etc.)
+          const defaultKeyPath = this.findDefaultKey();
+          if (defaultKeyPath) {
+            try {
+              keyData = fs.readFileSync(defaultKeyPath);
+              config.privateKey = keyData;
+              this.logger.info(`Auth: no key configured, using default key: ${defaultKeyPath} (${keyData.length} bytes)`);
+            } catch (e: any) {
+              this.logger.warn(`Auth: failed to read default key ${defaultKeyPath}: ${e.message}`);
+            }
+          } else {
+            this.logger.warn('Auth: privateKey type selected but no key provided and no default keys found');
+          }
         }
+
         if (auth.passphrase) {
           config.passphrase = auth.passphrase;
-        } else if (process.env.SSH_AUTH_SOCK) {
+          this.logger.info('Auth: passphrase provided');
+        } else if (keyData && this.isKeyEncrypted(keyData)) {
           // Encrypted key without passphrase: fall back to SSH agent
+          if (process.env.SSH_AUTH_SOCK) {
+            delete config.privateKey;
+            config.agent = process.env.SSH_AUTH_SOCK;
+            this.logger.info('Auth: encrypted key without passphrase, switched to SSH agent');
+          } else {
+            this.logger.warn('Auth: encrypted key without passphrase, but SSH agent not available — auth may fail');
+          }
+        } else if (process.env.SSH_AUTH_SOCK) {
+          // Unencrypted key with SSH agent available: use both for authentication
           config.agent = process.env.SSH_AUTH_SOCK;
-          delete config.privateKey;
-          delete config.passphrase;
-          this.logger.info('Encrypted private key detected without passphrase, using SSH agent');
+          this.logger.info('Auth: unencrypted key + SSH agent both configured');
+        } else {
+          this.logger.info('Auth: unencrypted key only (no SSH agent available)');
         }
+
+        // Always add tryKeyboard as a fallback so the server can prompt for password if key/agent fails
+        config.tryKeyboard = true;
+        this.logger.info('Auth: tryKeyboard enabled as fallback');
         break;
+      }
       case 'agent':
         config.agent = auth.agent || process.env.SSH_AUTH_SOCK;
+        config.tryKeyboard = true;
+        this.logger.info(`Auth: agent method (agent=${config.agent || 'not set'}) + tryKeyboard fallback`);
         break;
       case 'keyboard-interactive':
+        config.tryKeyboard = true;
+        this.logger.info('Auth: keyboard-interactive configured (tryKeyboard=true)');
         break;
     }
   }

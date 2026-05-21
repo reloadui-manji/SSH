@@ -15,5 +15,7 @@
   "command.syncUp": "SSH: 同步本地到远程",
   "command.syncDown": "SSH: 同步远程到本地",
   "command.syncDiff": "SSH: 显示同步差异",
-  "command.toggleAutoUpload": "SSH: 切换保存时自动上传"
+  "command.toggleAutoUpload": "SSH: 切换保存时自动上传",
+  "command.editConnection": "SSH: 编辑连接",
+  "command.deleteConnection": "SSH: 删除连接"
 }

@@ -19,7 +19,8 @@ export class RemoteConnectionItem extends RemoteTreeItem {
   ) {
     super(profile.name, vscode.TreeItemCollapsibleState.Collapsed);
     this.id = profile.id;
-    this.contextValue = status === ConnectionStatus.Connected ? 'connection-connected' : 'connection-disconnected';
+    const sourceSuffix = profile.source === 'manual' ? '-manual' : '-config';
+    this.contextValue = (status === ConnectionStatus.Connected ? 'connection-connected' : 'connection-disconnected') + sourceSuffix;
     this.iconPath = status === ConnectionStatus.Connected
       ? new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('terminal.ansiGreen'))
       : new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('terminal.ansiYellow'));

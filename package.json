@@ -2,7 +2,7 @@
   "name": "ssh-sftp-fs",
   "displayName": "SSH/SFTP Remote Explorer",
   "description": "SSH/SFTP file browser, editor, sync and terminal integration for VS Code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "manji",
   "engines": {
     "vscode": "^1.96.0"
@@ -14,8 +14,7 @@
     "onView:sshExplorer",
     "onFileSystem:ssh",
     "onCommand:ssh.connect",
-    "workspaceContains:**/.ssh-sync.json",
-    "*"
+    "workspaceContains:**/.ssh-sync.json"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -121,6 +120,16 @@
         "command": "ssh.toggleAutoUpload",
         "title": "SSH: Toggle Auto Upload on Save",
         "icon": "$(sync)"
+      },
+      {
+        "command": "ssh.editConnection",
+        "title": "%command.editConnection%",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "ssh.deleteConnection",
+        "title": "%command.deleteConnection%",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -144,22 +153,22 @@
         },
         {
           "command": "ssh.disconnect",
-          "when": "view == sshExplorer && viewItem == connection-connected",
+          "when": "view == sshExplorer && viewItem =~ /^connection-connected/",
           "group": "inline"
         },
         {
           "command": "ssh.openTerminal",
-          "when": "view == sshExplorer && viewItem == connection-connected",
+          "when": "view == sshExplorer && viewItem =~ /^connection-connected/",
           "group": "navigation"
         },
         {
           "command": "ssh.uploadFile",
-          "when": "view == sshExplorer && viewItem == connection-connected",
+          "when": "view == sshExplorer && viewItem =~ /^connection-connected/",
           "group": "navigation@1"
         },
         {
           "command": "ssh.uploadFolder",
-          "when": "view == sshExplorer && viewItem == connection-connected",
+          "when": "view == sshExplorer && viewItem =~ /^connection-connected/",
           "group": "navigation@2"
         },
         {
@@ -195,6 +204,16 @@
         {
           "command": "ssh.chmodFile",
           "when": "view == sshExplorer && viewItem =~ /^(file|directory)$/",
+          "group": "2_modification"
+        },
+        {
+          "command": "ssh.editConnection",
+          "when": "view == sshExplorer && viewItem =~ /^connection/",
+          "group": "2_modification"
+        },
+        {
+          "command": "ssh.deleteConnection",
+          "when": "view == sshExplorer && viewItem =~ /^connection/",
           "group": "2_modification"
         }
       ],
@@ -267,6 +286,11 @@
           "type": "number",
           "default": 4,
           "description": "Number of parallel file transfers"
+        },
+        "ssh.keyPassphrases": {
+          "type": "object",
+          "default": {},
+          "description": "Saved passphrases for encrypted private keys (keyed by key file path)"
         }
       }
     }

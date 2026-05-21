@@ -11,6 +11,26 @@ import { t } from '../utils/i18n';
 
 import { RemoteExplorerTreeProvider } from '../providers/remoteExplorer';
 
+type OverwriteAction = 'overwrite' | 'overwriteAll' | 'skip';
+
+async function confirmOverwrite(
+  remotePath: string,
+  existingAction?: OverwriteAction,
+): Promise<OverwriteAction | undefined> {
+  if (existingAction === 'overwriteAll') return 'overwriteAll';
+
+  const result = await vscode.window.showWarningMessage(
+    `"${remotePath}" already exists on remote. Overwrite?`,
+    { modal: true },
+    { title: 'Overwrite', isCloseAffordance: false },
+    { title: 'Overwrite All', isCloseAffordance: false },
+    { title: 'Skip', isCloseAffordance: false },
+  );
+
+  if (!result) return undefined;
+  return result.title as OverwriteAction;
+}
+
 export function registerFileCommands(
   context: vscode.ExtensionContext,
   connectionManager: ConnectionManager,
@@ -70,12 +90,22 @@ export function registerFileCommands(
         const profile = conn.getProfile();
         const remoteRoot = profile.remotePath || '/';
 
+        let overwriteAction: OverwriteAction | undefined;
+
         for (const item of selectedUris) {
           const stat = fs.statSync(item.fsPath);
 
           if (stat.isDirectory()) {
             const folderName = pathUtils.getFileName(item.fsPath);
             const remoteDir = pathUtils.joinRemotePath(remoteRoot, folderName);
+
+            const exists = await conn!.checkExists(remoteDir);
+            if (exists && overwriteAction !== 'overwriteAll') {
+              const action = await confirmOverwrite(remoteDir, overwriteAction);
+              if (!action) { vscode.window.showInformationMessage('Upload cancelled'); return; }
+              if (action === 'skip') continue;
+              overwriteAction = action;
+            }
 
             await vscode.window.withProgress(
               {
@@ -93,6 +123,14 @@ export function registerFileCommands(
           } else {
             const fileName = pathUtils.getFileName(item.fsPath);
             const remotePath = pathUtils.joinRemotePath(remoteRoot, fileName);
+
+            const exists = await conn!.checkExists(remotePath);
+            if (exists && overwriteAction !== 'overwriteAll') {
+              const action = await confirmOverwrite(remotePath, overwriteAction);
+              if (!action) { vscode.window.showInformationMessage('Upload cancelled'); return; }
+              if (action === 'skip') continue;
+              overwriteAction = action;
+            }
 
             await vscode.window.withProgress(
               {
@@ -131,9 +169,19 @@ export function registerFileCommands(
 
         if (!files || files.length === 0) return;
 
+        let overwriteAction: OverwriteAction | undefined;
+
         for (const file of files) {
           const fileName = pathUtils.getFileName(file.fsPath);
           const remotePath = pathUtils.joinRemotePath(targetDir, fileName);
+
+          const exists = await conn.checkExists(remotePath);
+          if (exists && overwriteAction !== 'overwriteAll') {
+            const action = await confirmOverwrite(remotePath, overwriteAction);
+            if (!action) { vscode.window.showInformationMessage('Upload cancelled'); return; }
+            if (action === 'skip') continue;
+            overwriteAction = action;
+          }
 
           await vscode.window.withProgress(
             {
@@ -173,9 +221,19 @@ export function registerFileCommands(
 
         if (!folders || folders.length === 0) return;
 
+        let overwriteAction: OverwriteAction | undefined;
+
         for (const folder of folders) {
           const folderName = pathUtils.getFileName(folder.fsPath);
           const remoteDir = pathUtils.joinRemotePath(targetDir, folderName);
+
+          const exists = await conn!.checkExists(remoteDir);
+          if (exists && overwriteAction !== 'overwriteAll') {
+            const action = await confirmOverwrite(remoteDir, overwriteAction);
+            if (!action) { vscode.window.showInformationMessage('Upload cancelled'); return; }
+            if (action === 'skip') continue;
+            overwriteAction = action;
+          }
 
           await vscode.window.withProgress(
             {
