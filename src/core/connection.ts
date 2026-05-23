@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
-import { Client, SFTPWrapper, Channel } from 'ssh2';
+import { Client, SFTPWrapper, Channel, utils as ssh2Utils } from 'ssh2';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ConnectionProfile, ConnectionStatus, Protocol } from './protocol';
+import type { RemoteConnection } from './remoteConnection';
+import { getSavedPassphrase, setSavedPassphrase } from './passphraseStore';
 import { Logger } from '../utils/logger';
 import * as pathUtils from '../utils/path';
 
@@ -24,7 +26,7 @@ export interface TransferProgress {
   percent: number;
 }
 
-export class SshConnection {
+export class SshConnection implements RemoteConnection {
   private client: Client;
   private sftp: SFTPWrapper | null = null;
   private _shellChannel: Channel | null = null;
@@ -68,8 +70,7 @@ export class SshConnection {
       }
       if (keyData && this.isKeyEncrypted(keyData)) {
         // Check for a saved passphrase first
-        const savedPassphrases = vscode.workspace.getConfiguration('ssh').get<Record<string, string>>('keyPassphrases', {});
-        const savedPassphrase = keyPath ? savedPassphrases[keyPath] : undefined;
+        const savedPassphrase = getSavedPassphrase(keyPath || '');
 
         if (savedPassphrase) {
           (this.profile.auth as any).passphrase = savedPassphrase;
@@ -85,12 +86,7 @@ export class SshConnection {
             (this.profile.auth as any).passphrase = passphrase;
             // Save passphrase for future connections
             if (keyPath) {
-              savedPassphrases[keyPath] = passphrase;
-              await vscode.workspace.getConfiguration('ssh').update(
-                'keyPassphrases',
-                savedPassphrases,
-                vscode.ConfigurationTarget.Global,
-              );
+              await setSavedPassphrase(keyPath, passphrase);
               this.logger.info(`Passphrase saved for ${keyPath}`);
             }
           } else {
@@ -109,17 +105,38 @@ export class SshConnection {
 
       this.client.once('ready', () => {
         clearTimeout(timer);
+
         this.logger.info(`Connected to ${this.profile.name} (${this.profile.host}:${this.profile.port})`);
         this.setStatus(ConnectionStatus.Connected);
         this.onConnected?.();
+
+        if (connectConfig.privateKey && typeof connectConfig.privateKey === 'string') {
+          connectConfig.privateKey = '';
+        }
+        if (connectConfig.passphrase) {
+          connectConfig.passphrase = '';
+        }
         resolve();
       });
 
       this.client.once('error', (err) => {
         clearTimeout(timer);
+
         this.setStatus(ConnectionStatus.Error);
+        if (connectConfig.privateKey && typeof connectConfig.privateKey === 'string') {
+          connectConfig.privateKey = '';
+        }
+        if (connectConfig.passphrase) {
+          connectConfig.passphrase = '';
+        }
         const wrappedErr = err instanceof Error ? err : new Error(String(err));
-        this.logger.error(`Connection error for ${this.profile.name}: ${wrappedErr.message} (level: ${(err as any).level || 'unknown'}, auth: ${this.profile.auth.type})`);
+        const errAny = err as any;
+        const details: string[] = [];
+        if (errAny.level) details.push(`level=${errAny.level}`);
+        if (errAny.authMethod) details.push(`method=${errAny.authMethod}`);
+        if (errAny.methodsLeft) details.push(`methodsLeft=${errAny.methodsLeft}`);
+        details.push(`auth=${this.profile.auth.type}`);
+        this.logger.error(`Connection error for ${this.profile.name}: ${wrappedErr.message} (${details.join(', ')})`);
         this.onError?.(wrappedErr);
         reject(wrappedErr);
       });
@@ -137,6 +154,9 @@ export class SshConnection {
         username: this.profile.username,
         readyTimeout: timeout,
         keepaliveInterval: this.profile.keepaliveInterval || 30000,
+        debug: (msg: string) => {
+          this.logger.info(`[ssh2] ${msg}`);
+        },
       };
 
       this.applyAuth(connectConfig);
@@ -503,7 +523,7 @@ export class SshConnection {
     });
   }
 
-  async createShellStream(): Promise<Channel> {
+  async createShellStream(_size: { columns?: number; rows?: number } = {}): Promise<Channel> {
     return new Promise((resolve, reject) => {
       this.client.shell({ term: 'xterm-256color' }, (err, stream) => {
         if (err) return reject(err);
@@ -620,9 +640,7 @@ export class SshConnection {
     // OpenSSH format keys: use ssh2's parseKey to check if a passphrase is needed
     if (header.includes('BEGIN OPENSSH PRIVATE KEY')) {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { parseKey } = require('ssh2');
-        const result = parseKey(keyData);
+        const result = ssh2Utils.parseKey(keyData);
         const isEncrypted = result instanceof Error;
         this.logger.info(`Key detection: OpenSSH format key, encrypted=${isEncrypted}${isEncrypted ? ` (${result.message})` : ''}`);
         return isEncrypted;
@@ -646,15 +664,35 @@ export class SshConnection {
         break;
       case 'privateKey': {
         let keyData: Buffer | undefined;
+        let hasCert = false;
+        let keyFormat = 'unknown';
+
         if (auth.privateKey) {
           keyData = Buffer.from(auth.privateKey);
-          config.privateKey = auth.privateKey;
           this.logger.info('Auth: using inline privateKey');
         } else if (auth.privateKeyPath) {
           try {
             keyData = fs.readFileSync(auth.privateKeyPath);
-            config.privateKey = keyData;
             this.logger.info(`Auth: read privateKey from ${auth.privateKeyPath} (${keyData.length} bytes)`);
+
+            // Check for SSH certificate (<key>-cert.pub) for CA-based authentication
+            const certPaths: string[] = [];
+            // Derive certificate path by appending -cert.pub
+            certPaths.push(auth.privateKeyPath + '-cert.pub');
+            // Derive certificate path by replacing extension (only if key has an extension)
+            const keyWithExt = auth.privateKeyPath.replace(/\.[^/.]+$/, '-cert.pub');
+            if (keyWithExt !== auth.privateKeyPath && !certPaths.includes(keyWithExt)) {
+              certPaths.push(keyWithExt);
+            }
+
+            for (const certPath of certPaths) {
+              const normalizedCertPath = path.normalize(certPath);
+              if (fs.existsSync(normalizedCertPath)) {
+                hasCert = true;
+                this.logger.info(`Auth: SSH certificate detected at ${normalizedCertPath}`);
+                break;
+              }
+            }
           } catch (e: any) {
             this.logger.error(`Auth: failed to read privateKey from ${auth.privateKeyPath}: ${e.message}`);
           }
@@ -664,8 +702,16 @@ export class SshConnection {
           if (defaultKeyPath) {
             try {
               keyData = fs.readFileSync(defaultKeyPath);
-              config.privateKey = keyData;
               this.logger.info(`Auth: no key configured, using default key: ${defaultKeyPath} (${keyData.length} bytes)`);
+
+              // Check for cert on default key too
+              const sshDir = path.join(os.homedir(), '.ssh');
+              const baseName = path.basename(defaultKeyPath);
+              const certPath = path.join(sshDir, baseName + '-cert.pub');
+              if (fs.existsSync(certPath)) {
+                hasCert = true;
+                this.logger.info(`Auth: SSH certificate detected for default key at ${certPath}`);
+              }
             } catch (e: any) {
               this.logger.warn(`Auth: failed to read default key ${defaultKeyPath}: ${e.message}`);
             }
@@ -674,9 +720,51 @@ export class SshConnection {
           }
         }
 
+        // If a certificate is detected and SSH agent is available, use agent
+        // (ssh-agent automatically associates -cert.pub files with their keys)
+        if (hasCert && process.env.SSH_AUTH_SOCK) {
+          config.agent = process.env.SSH_AUTH_SOCK;
+          config.tryKeyboard = true;
+          this.logger.info(`Auth: certificate detected, using SSH agent for cert-based authentication`);
+          break;
+        } else if (hasCert && !process.env.SSH_AUTH_SOCK) {
+          this.logger.warn('Auth: certificate detected but SSH_AUTH_SOCK not set — add key to ssh-agent first: ssh-add <key-path>');
+        }
+
+        // No cert or no agent: fall through to standard private key auth
+        if (keyData) {
+          config.privateKey = keyData;
+        }
+
+        // Detect key format for diagnostics
+        if (keyData) {
+          const header = keyData.toString('utf-8', 0, Math.min(50, keyData.length));
+          if (header.includes('BEGIN OPENSSH PRIVATE KEY')) {
+            keyFormat = 'OpenSSH';
+          } else if (header.includes('BEGIN RSA PRIVATE KEY')) {
+            keyFormat = 'PEM-RSA';
+          } else if (header.includes('BEGIN EC PRIVATE KEY')) {
+            keyFormat = 'PEM-EC';
+          } else if (header.includes('BEGIN PRIVATE KEY')) {
+            keyFormat = 'PKCS8';
+          } else if (header.includes('BEGIN DSA PRIVATE KEY')) {
+            keyFormat = 'PEM-DSA';
+          }
+          this.logger.info(`Auth: key format detected: ${keyFormat}`);
+        }
+
         if (auth.passphrase) {
           config.passphrase = auth.passphrase;
           this.logger.info('Auth: passphrase provided');
+          // Validate that the passphrase can actually decrypt the key
+          if (keyData) {
+            const parseResult = ssh2Utils.parseKey(keyData, auth.passphrase);
+            if (parseResult instanceof Error) {
+              this.logger.error(`Auth: passphrase validation failed — cannot decrypt key: ${parseResult.message}`);
+            } else {
+              this.logger.info('Auth: passphrase successfully decrypts the key');
+            }
+          }
         } else if (keyData && this.isKeyEncrypted(keyData)) {
           // Encrypted key without passphrase: fall back to SSH agent
           if (process.env.SSH_AUTH_SOCK) {
@@ -686,8 +774,9 @@ export class SshConnection {
           } else {
             this.logger.warn('Auth: encrypted key without passphrase, but SSH agent not available — auth may fail');
           }
-        } else if (process.env.SSH_AUTH_SOCK) {
+        } else if (!hasCert && process.env.SSH_AUTH_SOCK) {
           // Unencrypted key with SSH agent available: use both for authentication
+          // Skip for cert keys — the cert is already embedded in the key
           config.agent = process.env.SSH_AUTH_SOCK;
           this.logger.info('Auth: unencrypted key + SSH agent both configured');
         } else {
@@ -696,14 +785,16 @@ export class SshConnection {
 
         // Always add tryKeyboard as a fallback so the server can prompt for password if key/agent fails
         config.tryKeyboard = true;
-        this.logger.info('Auth: tryKeyboard enabled as fallback');
+        this.logger.info(`Auth: key authentication configured (format: ${keyFormat}, hasCert: ${hasCert}, encrypted: ${keyData ? this.isKeyEncrypted(keyData) : 'N/A'}, tryKeyboard: true)`);
         break;
       }
-      case 'agent':
-        config.agent = auth.agent || process.env.SSH_AUTH_SOCK;
+      case 'agent': {
+        const agentPath = auth.agent || process.env.SSH_AUTH_SOCK;
+        config.agent = agentPath;
         config.tryKeyboard = true;
-        this.logger.info(`Auth: agent method (agent=${config.agent || 'not set'}) + tryKeyboard fallback`);
+        this.logger.info(`Auth: agent method (agent=${agentPath || 'not set'}) + tryKeyboard fallback`);
         break;
+      }
       case 'keyboard-interactive':
         config.tryKeyboard = true;
         this.logger.info('Auth: keyboard-interactive configured (tryKeyboard=true)');

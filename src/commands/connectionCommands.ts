@@ -1,8 +1,6 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import SSHConfig, { LineType } from 'ssh-config';
 import { ConnectionManager } from '../core/connectionManager';
-import { ConnectionProfile, ConnectionStatus, Protocol, AuthConfig } from '../core/protocol';
+import { ConnectionStatus, Protocol, AuthConfig, ConnectionProfile } from '../core/protocol';
 import { RemoteExplorerTreeProvider } from '../providers/remoteExplorer';
 import { StatusBarManager } from '../statusbar/statusBarManager';
 import { Logger } from '../utils/logger';
@@ -24,7 +22,7 @@ export function registerConnectionCommands(
         } else {
           const profiles = connectionManager.getAllProfiles();
           if (profiles.length === 0) {
-            vscode.window.showWarningMessage('No SSH connections configured. Add connections via settings or ~/.ssh/config');
+            vscode.window.showWarningMessage('No SSH connections configured. Add connections in VS Code settings.');
             return;
           }
           const selected = await vscode.window.showQuickPick(
@@ -41,10 +39,6 @@ export function registerConnectionCommands(
 
         const profile = connectionManager.getProfile(profileId);
         if (!profile) return;
-
-        logger.show();
-        logger.info(`=== Connect requested: ${profile.name} (${profile.username}@${profile.host}:${profile.port}) ===`);
-        logger.info(`Auth type: ${profile.auth.type}, privateKeyPath: ${profile.auth.privateKeyPath || 'not set'}, has passphrase: ${!!profile.auth.passphrase}`);
 
         await vscode.window.withProgress(
           {
@@ -191,51 +185,9 @@ export function registerConnectionCommands(
         const profile = connectionManager.getProfile(profileId);
         if (!profile) return;
 
-        const panel = vscode.window.createWebviewPanel(
-          'sshEditConnection',
-          `编辑连接: ${profile.name}`,
-          vscode.ViewColumn.One,
-          { enableScripts: true, retainContextWhenHidden: true },
-        );
-
-        panel.webview.html = getEditConnectionHtml(profile);
-
-        panel.webview.onDidReceiveMessage(async (msg) => {
-          switch (msg.type) {
-            case 'save': {
-              const { name, host, port, username, authType, password, privateKeyPath, remotePath, protocol } = msg.data;
-
-              if (!name || !host || !username) {
-                vscode.window.showErrorMessage('名称、主机和用户名不能为空');
-                return;
-              }
-
-              const auth: AuthConfig = authType === 'password'
-                ? { type: 'password', password: password || undefined }
-                : authType === 'agent'
-                  ? { type: 'agent' }
-                  : { type: 'privateKey', privateKeyPath: privateKeyPath || undefined };
-
-              if (profile.source === 'config-file') {
-                updateSshConfigFile(profile, { name, host, port, username, auth, remotePath });
-              } else {
-                await updateManualConnection(profileId, { name, host, port, username, auth, remotePath, protocol });
-              }
-
-              panel.dispose();
-              connectionManager.reload();
-              treeProvider.refresh();
-              logger.info(`Edited connection: ${name} (${username}@${host}:${port})`);
-              vscode.window.showInformationMessage(`连接 "${name}" 已更新`);
-              break;
-            }
-            case 'cancel':
-              panel.dispose();
-              break;
-          }
-        });
+        openConnectionEditor(connectionManager, treeProvider, statusBar, logger, profile);
       } catch (err) {
-        vscode.window.showErrorMessage(`编辑连接失败: ${err}`);
+        vscode.window.showErrorMessage(`Failed to open editor: ${err}`);
       }
     }),
 
@@ -251,296 +203,353 @@ export function registerConnectionCommands(
         if (!profile) return;
 
         const confirm = await vscode.window.showWarningMessage(
-          `确定要删除连接 "${profile.name}" 吗？此操作不可撤销。`,
+          `确定要删除连接 "${profile.name}" 吗？`,
           { modal: true },
           '删除',
         );
         if (confirm !== '删除') return;
 
-        await connectionManager.disconnect(profileId);
-        statusBar.updateConnectionStatus(profileId, profile.name, ConnectionStatus.Disconnected);
-
-        if (profile.source === 'config-file') {
-          deleteFromSshConfig(profile);
-        } else {
-          const connections = vscode.workspace.getConfiguration('ssh').get<Array<Record<string, unknown>>>('connections', []);
-          const filtered = connections.filter((c: any) => c.id !== profileId);
-          await vscode.workspace.getConfiguration('ssh').update(
-            'connections',
-            filtered,
-            vscode.ConfigurationTarget.Global,
-          );
+        // Disconnect first if connected
+        const conn = connectionManager.getConnection(profileId);
+        if (conn && conn.status === ConnectionStatus.Connected) {
+          await connectionManager.disconnect(profileId);
         }
 
+        // Remove from settings
+        const connections = vscode.workspace.getConfiguration('ssh').get<Array<Record<string, unknown>>>('connections', []);
+        const updated = connections.filter((c: Record<string, unknown>) => c.id !== profileId && c.name !== profile.name);
+
+        await vscode.workspace.getConfiguration('ssh').update(
+          'connections',
+          updated,
+          vscode.ConfigurationTarget.Global,
+        );
+
+        statusBar.updateConnectionStatus(profileId, profile.name, ConnectionStatus.Disconnected);
         treeProvider.refresh();
-        vscode.window.showInformationMessage(`连接 "${profile.name}" 已删除`);
+        logger.info(`Deleted connection: ${profile.name}`);
+        vscode.window.showInformationMessage(`已删除连接 "${profile.name}"`);
       } catch (err) {
-        vscode.window.showErrorMessage(`删除连接失败: ${err}`);
+        vscode.window.showErrorMessage(`Failed to delete connection: ${err}`);
       }
     }),
   );
 }
 
-function getEditConnectionHtml(profile: ConnectionProfile): string {
-  const authType = profile.auth.type;
-  const privateKeyPath = profile.auth.privateKeyPath || '';
-  const hasPassword = !!profile.auth.password;
-  const remotePath = profile.remotePath || '';
-  const sourceLabel = profile.source === 'config-file' ? 'SSH 配置文件' : '手动配置';
-
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>编辑连接</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { padding: 16px; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-    h3 { margin-bottom: 16px; font-weight: 500; }
-    .form-group { margin-bottom: 14px; }
-    label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-    input, select { width: 100%; padding: 6px 8px; border: 1px solid var(--vscode-input-border); background: var(--vscode-input-background); color: var(--vscode-input-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); border-radius: 2px; }
-    input:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); }
-    .row { display: flex; gap: 12px; }
-    .row > * { flex: 1; }
-    .auth-section { display: none; margin-top: 8px; }
-    .auth-section.visible { display: block; }
-    .buttons { margin-top: 20px; display: flex; gap: 8px; justify-content: flex-end; }
-    button { padding: 6px 16px; border: none; border-radius: 2px; cursor: pointer; font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
-    .btn-save { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-    .btn-save:hover { background: var(--vscode-button-hoverBackground); }
-    .btn-cancel { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
-    .btn-cancel:hover { background: var(--vscode-button-secondaryHoverBackground); }
-    .source-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); margin-left: 8px; }
-    .hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
-  </style>
-</head>
-<body>
-  <h3>编辑连接 <span class="source-badge">${sourceLabel}</span></h3>
-  <form id="editForm">
-    <div class="form-group">
-      <label>连接名称 *</label>
-      <input type="text" id="name" value="${escapeHtml(profile.name)}" required>
-    </div>
-    <div class="row">
-      <div class="form-group">
-        <label>服务器地址 *</label>
-        <input type="text" id="host" value="${escapeHtml(profile.host)}" required>
-      </div>
-      <div class="form-group">
-        <label>端口</label>
-        <input type="number" id="port" value="${profile.port}">
-      </div>
-    </div>
-    <div class="form-group">
-      <label>用户名 *</label>
-      <input type="text" id="username" value="${escapeHtml(profile.username)}" required>
-    </div>
-    <div class="form-group">
-      <label>认证方式</label>
-      <select id="authType">
-        <option value="privateKey" ${authType === 'privateKey' ? 'selected' : ''}>SSH 密钥</option>
-        <option value="password" ${authType === 'password' ? 'selected' : ''}>密码</option>
-        <option value="agent" ${authType === 'agent' ? 'selected' : ''}>SSH Agent</option>
-      </select>
-    </div>
-    <div class="auth-section ${authType === 'privateKey' ? 'visible' : ''}" id="keySection">
-      <div class="form-group">
-        <label>私钥路径</label>
-        <input type="text" id="privateKeyPath" value="${escapeHtml(privateKeyPath)}" placeholder="~/.ssh/id_rsa">
-        <div class="hint">留空使用默认密钥</div>
-      </div>
-    </div>
-    <div class="auth-section ${authType === 'password' ? 'visible' : ''}" id="passwordSection">
-      <div class="form-group">
-        <label>密码</label>
-        <input type="password" id="password" placeholder="${hasPassword ? '(已设置,留空保持不变)' : ''}">
-        ${hasPassword ? '<div class="hint">留空则保持原密码不变</div>' : ''}
-      </div>
-    </div>
-    <div class="form-group">
-      <label>远程根路径</label>
-      <input type="text" id="remotePath" value="${escapeHtml(remotePath)}" placeholder="/home/user">
-    </div>
-    <div class="form-group">
-      <label>传输协议</label>
-      <select id="protocol">
-        <option value="sftp" ${profile.protocol === 'sftp' ? 'selected' : ''}>SFTP</option>
-        <option value="scp" ${profile.protocol === 'scp' ? 'selected' : ''}>SCP</option>
-      </select>
-    </div>
-    <div class="buttons">
-      <button type="button" class="btn-cancel" id="btnCancel">取消</button>
-      <button type="button" class="btn-save" id="btnSave">保存</button>
-    </div>
-  </form>
-  <script>
-    const vscode = acquireVsCodeApi();
-    const authType = document.getElementById('authType');
-    const keySection = document.getElementById('keySection');
-    const passwordSection = document.getElementById('passwordSection');
-
-    authType.addEventListener('change', () => {
-      keySection.classList.toggle('visible', authType.value === 'privateKey');
-      passwordSection.classList.toggle('visible', authType.value === 'password');
-    });
-
-    document.getElementById('btnSave').addEventListener('click', () => {
-      vscode.postMessage({
-        type: 'save',
-        data: {
-          name: document.getElementById('name').value.trim(),
-          host: document.getElementById('host').value.trim(),
-          port: parseInt(document.getElementById('port').value) || 22,
-          username: document.getElementById('username').value.trim(),
-          authType: authType.value,
-          password: document.getElementById('password').value,
-          privateKeyPath: document.getElementById('privateKeyPath').value.trim(),
-          remotePath: document.getElementById('remotePath').value.trim(),
-          protocol: document.getElementById('protocol').value,
-        },
-      });
-    });
-
-    document.getElementById('btnCancel').addEventListener('click', () => {
-      vscode.postMessage({ type: 'cancel' });
-    });
-  </script>
-</body>
-</html>`;
+interface ConnectionEditorData {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authType: string;
+  privateKeyPath: string;
+  password: string;
+  agent: string;
+  remotePath: string;
+  protocol: string;
+  backend: string;
+  certificatePath: string;
+  passphrase: string;
 }
 
-function escapeHtml(str: string): string {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-async function updateManualConnection(
-  profileId: string,
-  data: { name: string; host: string; port: number; username: string; auth: AuthConfig; remotePath: string; protocol: string },
-): Promise<void> {
-  const connections = vscode.workspace.getConfiguration('ssh').get<Array<Record<string, unknown>>>('connections', []);
-  const index = connections.findIndex((c: any) => c.id === profileId);
-  if (index !== -1) {
-    connections[index] = {
-      ...connections[index],
-      name: data.name,
-      host: data.host,
-      port: data.port,
-      username: data.username,
-      protocol: data.protocol,
-      auth: data.auth,
-      remotePath: data.remotePath,
-    };
-  }
-  await vscode.workspace.getConfiguration('ssh').update('connections', connections, vscode.ConfigurationTarget.Global);
-}
-
-function updateSshConfigFile(
+function openConnectionEditor(
+  connectionManager: ConnectionManager,
+  treeProvider: RemoteExplorerTreeProvider,
+  _statusBar: StatusBarManager,
+  logger: Logger,
   profile: ConnectionProfile,
-  data: { name: string; host: string; port: number; username: string; auth: AuthConfig; remotePath: string },
 ): void {
-  const configPath = profile.configFilePath;
-  if (!configPath || !fs.existsSync(configPath)) {
-    throw new Error('SSH 配置文件不存在');
-  }
-
-  const content = fs.readFileSync(configPath, 'utf-8');
-  const config = SSHConfig.parse(content);
-
-  for (const line of config) {
-    if (line.type === LineType.DIRECTIVE && line.param === 'Host' && line.value === profile.name) {
-      applyDirective(line, 'HostName', data.host);
-      applyDirective(line, 'Port', data.port === 22 ? undefined : String(data.port));
-      applyDirective(line, 'User', data.username);
-
-      removeDirective(line, 'IdentityFile');
-      removeDirective(line, 'IdentityAgent');
-
-      if (data.auth.type === 'privateKey' && data.auth.privateKeyPath) {
-        addDirective(line, 'IdentityFile', data.auth.privateKeyPath);
-      } else if (data.auth.type === 'agent') {
-        addDirective(line, 'IdentityAgent', data.auth.agent || process.env.SSH_AUTH_SOCK || '');
-      }
-
-      if (data.remotePath) {
-        applyDirective(line, 'RemotePath', data.remotePath);
-      } else {
-        removeDirective(line, 'RemotePath');
-      }
-
-      if (data.name !== profile.name) {
-        line.value = data.name;
-      }
-
-      break;
-    }
-  }
-
-  fs.writeFileSync(configPath, SSHConfig.stringify(config), 'utf-8');
-}
-
-function applyDirective(hostLine: any, param: string, value: string | undefined): void {
-  if (!hostLine.config) hostLine.config = [];
-  const existing = hostLine.config.find((c: any) => c.param === param);
-  if (existing) {
-    if (value !== undefined) {
-      existing.value = value;
-    } else {
-      const idx = hostLine.config.indexOf(existing);
-      hostLine.config.splice(idx, 1);
-    }
-  } else if (value !== undefined) {
-    const lastChild = hostLine.config[hostLine.config.length - 1];
-    const newDirective: any = {
-      type: LineType.DIRECTIVE,
-      param,
-      separator: ' ',
-      value,
-      before: '  ',
-      after: '',
-    };
-    if (lastChild) lastChild.after = '\n';
-    hostLine.config.push(newDirective);
-  }
-}
-
-function removeDirective(hostLine: any, param: string): void {
-  if (!hostLine.config) return;
-  const idx = hostLine.config.findIndex((c: any) => c.param === param);
-  if (idx !== -1) hostLine.config.splice(idx, 1);
-}
-
-function addDirective(hostLine: any, param: string, value: string): void {
-  if (!hostLine.config) hostLine.config = [];
-  const lastChild = hostLine.config[hostLine.config.length - 1];
-  const newDirective: any = {
-    type: LineType.DIRECTIVE,
-    param,
-    separator: ' ',
-    value,
-    before: '  ',
-    after: '',
+  const data: ConnectionEditorData = {
+    id: profile.id,
+    name: profile.name,
+    host: profile.host,
+    port: profile.port,
+    username: profile.username,
+    authType: profile.auth.type,
+    privateKeyPath: profile.auth.privateKeyPath || '',
+    password: profile.auth.password || '',
+    agent: profile.auth.agent || '',
+    remotePath: profile.remotePath || '',
+    protocol: profile.protocol || Protocol.SFTP,
+    backend: profile.backend || 'auto',
+    certificatePath: profile.auth.certificatePath || '',
+    passphrase: profile.auth.passphrase || '',
   };
-  if (lastChild) lastChild.after = '\n';
-  hostLine.config.push(newDirective);
-}
 
-function deleteFromSshConfig(profile: ConnectionProfile): void {
-  const configPath = profile.configFilePath;
-  if (!configPath || !fs.existsSync(configPath)) {
-    throw new Error('SSH 配置文件不存在');
-  }
-
-  const content = fs.readFileSync(configPath, 'utf-8');
-  const config = SSHConfig.parse(content);
-
-  const idx = config.findIndex(
-    (line: any) => line.type === LineType.DIRECTIVE && line.param === 'Host' && line.value === profile.name,
+  const panel = vscode.window.createWebviewPanel(
+    'sshConnectionEditor',
+    `编辑连接 — ${profile.name}`,
+    vscode.ViewColumn.One,
+    { enableScripts: true },
   );
 
-  if (idx !== -1) {
-    config.splice(idx, 1);
-    fs.writeFileSync(configPath, SSHConfig.stringify(config), 'utf-8');
+  panel.webview.html = buildConnectionEditorHtml(data);
+
+  panel.webview.onDidReceiveMessage(async (msg) => {
+    if (msg.type === 'save') {
+      try {
+        const saved = msg.data as ConnectionEditorData;
+        if (!saved.name || !saved.host || !saved.username) {
+          vscode.window.showErrorMessage('连接名称、服务器地址和用户名为必填项');
+          return;
+        }
+
+        let auth: AuthConfig;
+        switch (saved.authType) {
+          case 'password':
+            auth = {
+              type: 'password',
+              password: saved.password || profile.auth.password,
+            };
+            break;
+          case 'agent':
+            auth = {
+              type: 'agent',
+              agent: saved.agent || undefined,
+            };
+            break;
+          case 'keyboard-interactive':
+            auth = { type: 'keyboard-interactive' };
+            break;
+          default:
+            auth = {
+              type: 'privateKey',
+              privateKeyPath: saved.privateKeyPath || undefined,
+              certificatePath: saved.certificatePath || undefined,
+              passphrase: saved.passphrase || undefined,
+            };
+            break;
+        }
+
+        const connections = vscode.workspace.getConfiguration('ssh').get<Array<Record<string, unknown>>>('connections', []);
+        const idx = connections.findIndex((c: Record<string, unknown>) => c.id === saved.id || c.name === profile.name);
+
+        const profileEntry: Record<string, unknown> = {
+          id: saved.id,
+          name: saved.name,
+          host: saved.host,
+          port: saved.port,
+          username: saved.username,
+          protocol: saved.protocol,
+          backend: saved.backend,
+          auth,
+          remotePath: saved.remotePath,
+        };
+
+        if (idx >= 0) {
+          connections[idx] = profileEntry;
+        } else {
+          connections.push(profileEntry);
+        }
+
+        await vscode.workspace.getConfiguration('ssh').update(
+          'connections',
+          connections,
+          vscode.ConfigurationTarget.Global,
+        );
+
+        connectionManager.reload();
+        treeProvider.refresh();
+        logger.info(`Updated connection: ${saved.name}`);
+        vscode.window.showInformationMessage(`已更新连接 "${saved.name}"`);
+        panel.dispose();
+      } catch (err) {
+        vscode.window.showErrorMessage(`保存失败: ${err}`);
+      }
+    } else if (msg.type === 'cancel') {
+      panel.dispose();
+    }
+  });
+}
+
+const AUTH_TYPE_LABELS: Record<string, string> = {
+  password: '密码',
+  privateKey: 'SSH 密钥',
+  agent: 'SSH Agent',
+  'keyboard-interactive': '键盘交互',
+};
+
+function buildConnectionEditorHtml(data: ConnectionEditorData): string {
+  const authOptions = Object.entries(AUTH_TYPE_LABELS).map(([value, label]) =>
+    `<option value="${value}" ${value === data.authType ? 'selected' : ''}>${label}</option>`
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<style>
+  :root {
+    --bg: var(--vscode-editor-background, #1e1e1e);
+    --fg: var(--vscode-editor-foreground, #cccccc);
+    --border: var(--vscode-panel-border, #444);
+    --input-bg: var(--vscode-input-background, #3c3c3c);
+    --input-fg: var(--vscode-input-foreground, #cccccc);
+    --button-bg: var(--vscode-button-background, #0e639c);
+    --button-fg: var(--vscode-button-foreground, #ffffff);
+    --button-hover: var(--vscode-button-hoverBackground, #1177bb);
+    --secondary-bg: var(--vscode-button-secondaryBackground, #3a3d41);
+    --secondary-hover: var(--vscode-button-secondaryHoverBackground, #45494e);
+    --desc: var(--vscode-descriptionForeground, #888);
   }
+  body { background: var(--bg); color: var(--fg); font-family: var(--vscode-font-family, sans-serif); padding: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0 0 16px; font-weight: 600; }
+  .form-group { margin-bottom: 12px; }
+  label { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500; }
+  label .required { color: #f48771; }
+  input, select { width: 100%; padding: 6px 8px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--border); border-radius: 4px; font-size: 13px; box-sizing: border-box; }
+  input:focus, select:focus { outline: 1px solid var(--button-bg); border-color: var(--button-bg); }
+  .auth-section { padding: 8px 0; }
+  .auth-fields { display: none; }
+  .auth-fields.active { display: block; }
+  .button-row { display: flex; gap: 8px; margin-top: 16px; }
+  .btn { padding: 8px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; color: var(--button-fg); background: var(--button-bg); }
+  .btn:hover { background: var(--button-hover); }
+  .btn-secondary { background: var(--secondary-bg); color: var(--vscode-button-secondaryForeground, #cccccc); }
+  .btn-secondary:hover { background: var(--secondary-hover); }
+  .hint { color: var(--desc); font-size: 12px; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; background: var(--button-bg); color: var(--button-fg); font-size: 11px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <h2>编辑连接 <span class="badge">手动配置</span></h2>
+  <div class="form-group">
+    <label>连接名称 <span class="required">*</span></label>
+    <input type="text" id="name" value="${data.name}" required>
+  </div>
+  <div class="form-group">
+    <label>服务器地址 <span class="required">*</span></label>
+    <input type="text" id="host" value="${data.host}" required>
+  </div>
+  <div class="form-group">
+    <label>端口</label>
+    <input type="number" id="port" value="${data.port}" min="1" max="65535">
+  </div>
+  <div class="form-group">
+    <label>用户名 <span class="required">*</span></label>
+    <input type="text" id="username" value="${data.username}" required>
+  </div>
+  <div class="form-group auth-section">
+    <label>认证方式</label>
+    <select id="authType">
+      ${authOptions}
+    </select>
+  </div>
+
+  <div class="auth-fields" id="fields-privateKey">
+    <div class="form-group">
+      <label>私钥路径</label>
+      <input type="text" id="privateKeyPath" value="${data.privateKeyPath}" placeholder="~/.ssh/id_rsa">
+    </div>
+    <div class="form-group" id="certField">
+      <label>证书文件路径（可选）</label>
+      <input type="text" id="certificatePath" value="${data.certificatePath}" placeholder="~/.ssh/id_rsa-cert.pub">
+      <div class="hint">SSH 证书认证（CA-based），仅 openssh 后端支持</div>
+    </div>
+    <div class="form-group">
+      <label>私钥密码短语</label>
+      <input type="password" id="passphrase" value="${data.passphrase}" placeholder="已设置则留空保持原密码">
+    </div>
+  </div>
+
+  <div class="auth-fields" id="fields-password">
+    <div class="form-group">
+      <label>密码</label>
+      <input type="password" id="password" value="${data.password}" placeholder="留空保持原密码">
+    </div>
+  </div>
+
+  <div class="auth-fields" id="fields-agent">
+    <div class="form-group">
+      <label>Agent Socket 路径（可选）</label>
+      <input type="text" id="agent" value="${data.agent}" placeholder="$SSH_AUTH_SOCK">
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label>远程根路径</label>
+    <input type="text" id="remotePath" value="${data.remotePath}" placeholder="/home/user">
+  </div>
+  <div class="form-group">
+    <label>传输协议</label>
+    <select id="protocol">
+      <option value="sftp" ${data.protocol === 'sftp' ? 'selected' : ''}>SFTP</option>
+      <option value="scp" ${data.protocol === 'scp' ? 'selected' : ''}>SCP</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>连接后端</label>
+    <select id="backend">
+      <option value="auto" ${data.backend === 'auto' ? 'selected' : ''}>自动（默认）</option>
+      <option value="ssh2" ${data.backend === 'ssh2' ? 'selected' : ''}>ssh2（纯 Node.js）</option>
+      <option value="openssh" ${data.backend === 'openssh' ? 'selected' : ''}>openssh（系统 ssh/scp）</option>
+    </select>
+    <div class="hint">ssh2：内置 SSH 库；openssh：使用系统 ssh/scp 命令，支持证书认证</div>
+  </div>
+
+  <div class="button-row">
+    <button class="btn" id="save">保存</button>
+    <button class="btn btn-secondary" id="cancel">取消</button>
+  </div>
+
+<script>
+  var vscode = acquireVsCodeApi();
+  var authType = document.getElementById('authType');
+  var backendSelect = document.getElementById('backend');
+  var certField = document.getElementById('certField');
+  var certificatePathInput = document.getElementById('certificatePath');
+  var fields = document.querySelectorAll('.auth-fields');
+
+  function showAuthFields() {
+    var val = authType.value;
+    fields.forEach(function(f) { f.classList.remove('active'); });
+    var target = document.getElementById('fields-' + val);
+    if (target) target.classList.add('active');
+  }
+
+  function updateCertFieldVisibility() {
+    if (!certField) return;
+    var backend = backendSelect.value;
+    if (backend === 'ssh2') {
+      certField.classList.add('hidden');
+      certificatePathInput.value = '';
+    } else {
+      certField.classList.remove('hidden');
+    }
+  }
+
+  authType.addEventListener('change', showAuthFields);
+  backendSelect.addEventListener('change', updateCertFieldVisibility);
+  showAuthFields();
+  updateCertFieldVisibility();
+
+  document.getElementById('save').addEventListener('click', function() {
+    var data = {
+      id: ${JSON.stringify(data.id)},
+      name: document.getElementById('name').value,
+      host: document.getElementById('host').value,
+      port: parseInt(document.getElementById('port').value) || 22,
+      username: document.getElementById('username').value,
+      authType: authType.value,
+      privateKeyPath: document.getElementById('privateKeyPath').value,
+      password: document.getElementById('password').value,
+      agent: document.getElementById('agent').value,
+      remotePath: document.getElementById('remotePath').value,
+      protocol: document.getElementById('protocol').value,
+      backend: document.getElementById('backend').value,
+      certificatePath: document.getElementById('backend').value === 'ssh2' ? '' : document.getElementById('certificatePath').value,
+      passphrase: document.getElementById('passphrase').value
+    };
+    vscode.postMessage({ type: 'save', data: data });
+  });
+
+  document.getElementById('cancel').addEventListener('click', function() {
+    vscode.postMessage({ type: 'cancel' });
+  });
+</script>
+</body>
+</html>`;
 }

@@ -2,7 +2,7 @@
   "name": "ssh-sftp-fs",
   "displayName": "SSH/SFTP Remote Explorer",
   "description": "SSH/SFTP file browser, editor, sync and terminal integration for VS Code",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "manji",
   "engines": {
     "vscode": "^1.96.0"
@@ -14,7 +14,8 @@
     "onView:sshExplorer",
     "onFileSystem:ssh",
     "onCommand:ssh.connect",
-    "workspaceContains:**/.ssh-sync.json"
+    "workspaceContains:**/.ssh-sync.json",
+    "*"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -168,7 +169,7 @@
         },
         {
           "command": "ssh.uploadFolder",
-          "when": "view == sshExplorer && viewItem =~ /^connection-connected/",
+          "when": "view == sshExplorer && viewItem == connection-connected",
           "group": "navigation@2"
         },
         {
@@ -209,12 +210,12 @@
         {
           "command": "ssh.editConnection",
           "when": "view == sshExplorer && viewItem =~ /^connection/",
-          "group": "2_modification"
+          "group": "3_connection"
         },
         {
           "command": "ssh.deleteConnection",
           "when": "view == sshExplorer && viewItem =~ /^connection/",
-          "group": "2_modification"
+          "group": "3_connection"
         }
       ],
       "explorer/context": [
@@ -267,11 +268,6 @@
           "default": "sftp",
           "description": "Default transfer protocol"
         },
-        "ssh.configPath": {
-          "type": "string",
-          "default": "~/.ssh/config",
-          "description": "Path to SSH config file"
-        },
         "ssh.showStatusBar": {
           "type": "boolean",
           "default": true,
@@ -286,11 +282,6 @@
           "type": "number",
           "default": 4,
           "description": "Number of parallel file transfers"
-        },
-        "ssh.keyPassphrases": {
-          "type": "object",
-          "default": {},
-          "description": "Saved passphrases for encrypted private keys (keyed by key file path)"
         }
       }
     }
@@ -325,7 +316,6 @@
   },
   "dependencies": {
     "chokidar": "^4.0.3",
-    "ssh-config": "^5.0.0",
     "ssh2": "^1.16.0",
     "ssh2-sftp-client": "^11.0.0"
   }

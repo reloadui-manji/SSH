@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { ConnectionManager } from '../core/connectionManager';
-import { SshConnection } from '../core/connection';
+import type { RemoteConnection, TransferProgress } from '../core/remoteConnection';
 import { ConnectionStatus } from '../core/protocol';
 import { RemoteFileItem, RemoteDirectoryItem } from '../providers/treeItems';
 import { SyncEngine } from '../sync/syncEngine';
@@ -114,7 +114,7 @@ export function registerFileCommands(
                 cancellable: false,
               },
               async (progress) => {
-                await conn!.uploadDirectory(item.fsPath, remoteDir, (p) => {
+                await conn!.uploadDirectory(item.fsPath, remoteDir, (p: TransferProgress) => {
                   progress.report({ increment: p.percent / 100, message: `${p.percent}%` });
                 });
               },
@@ -139,7 +139,7 @@ export function registerFileCommands(
                 cancellable: false,
               },
               async (progress) => {
-                await conn!.uploadFile(item.fsPath, remotePath, (p) => {
+                await conn!.uploadFile(item.fsPath, remotePath, (p: TransferProgress) => {
                   progress.report({ increment: p.percent / 100, message: `${p.percent}%` });
                 });
               },
@@ -190,7 +190,7 @@ export function registerFileCommands(
               cancellable: false,
             },
             async (progress) => {
-              await conn.uploadFile(file.fsPath, remotePath, (p) => {
+              await conn.uploadFile(file.fsPath, remotePath, (p: TransferProgress) => {
                 progress.report({ increment: p.percent / 100, message: `${p.percent}%` });
               });
             },
@@ -242,7 +242,7 @@ export function registerFileCommands(
               cancellable: false,
             },
             async (progress) => {
-              await conn!.uploadDirectory(folder.fsPath, remoteDir, (p) => {
+              await conn!.uploadDirectory(folder.fsPath, remoteDir, (p: TransferProgress) => {
                 progress.report({ increment: p.percent / 100, message: `${p.percent}%` });
               });
             },
@@ -282,7 +282,7 @@ export function registerFileCommands(
             cancellable: false,
           },
           async (progress) => {
-            await conn.downloadFile(item.fullPath, localPath, (p) => {
+            await conn.downloadFile(item.fullPath, localPath, (p: TransferProgress) => {
               progress.report({ increment: p.percent / 100, message: `${p.percent}%` });
             });
           },
@@ -306,7 +306,6 @@ export function registerFileCommands(
 
           const uri = vscode.Uri.parse(`ssh://${fileItem.connectionId}${fileItem.fullPath}`);
           const doc = await vscode.workspace.openTextDocument(uri);
-          // preview: false ensures each file opens in its own persistent tab
           await vscode.window.showTextDocument(doc, { preview: false });
         }
       } catch (err) {
@@ -414,7 +413,6 @@ export function registerFileCommands(
     }),
   );
 
-  // Listen for file saves and auto-upload workspace files
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (doc) => {
       if (doc.uri.scheme === 'file' && vscode.workspace.getConfiguration('ssh').get<boolean>('autoUpload', false)) {
@@ -437,7 +435,6 @@ function parseMode(mode: number): PermBits {
     other: mode & 7,
   };
 }
-
 
 async function showPermissionPicker(bits: PermBits, fileName: string, fullPath: string, _currentMode: number): Promise<PermBits | undefined> {
   const panel = vscode.window.createWebviewPanel(
@@ -680,7 +677,7 @@ function buildPermissionHtml(
 async function getActiveConnection(
   connectionManager: ConnectionManager,
   connectionId?: string,
-): Promise<SshConnection | undefined> {
+): Promise<RemoteConnection | undefined> {
   if (connectionId) {
     const conn = connectionManager.getConnection(connectionId);
     if (conn?.status === ConnectionStatus.Connected) {

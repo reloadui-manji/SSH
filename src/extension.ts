@@ -90,6 +90,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (vscode.workspace.getConfiguration('ssh').get<boolean>('autoUpload', false)) {
     syncEngine.startAutoUpload();
   }
+
+  // Handle showStatusBar setting
+  const showStatusBar = vscode.workspace.getConfiguration('ssh').get<boolean>('showStatusBar', true);
+  if (statusBar) {
+    if (showStatusBar) {
+      statusBar.show();
+    } else {
+      statusBar.hide();
+    }
+  }
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('ssh.showStatusBar')) {
+        const show = vscode.workspace.getConfiguration('ssh').get<boolean>('showStatusBar', true);
+        if (statusBar) {
+          if (show) {
+            statusBar.show();
+          } else {
+            statusBar.hide();
+          }
+        }
+      }
+    }),
+  );
 }
 
 export function deactivate(): void {

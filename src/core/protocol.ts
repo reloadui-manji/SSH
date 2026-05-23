@@ -3,11 +3,14 @@ export enum Protocol {
   SCP = 'scp',
 }
 
+export type ConnectionBackend = 'auto' | 'ssh2' | 'openssh';
+
 export interface AuthConfig {
   type: 'password' | 'privateKey' | 'agent' | 'keyboard-interactive';
   password?: string;
   privateKey?: string;
   privateKeyPath?: string;
+  certificatePath?: string;
   passphrase?: string;
   agent?: string;
 }
@@ -20,13 +23,13 @@ export interface ConnectionProfile {
   username: string;
   protocol: Protocol;
   auth: AuthConfig;
+  backend?: ConnectionBackend;
   remotePath?: string;
   localPath?: string;
   connectTimeout?: number;
   keepaliveInterval?: number;
   concurrency?: number;
-  source: 'config-file' | 'manual';
-  configFilePath?: string;
+  source: 'manual';
 }
 
 export enum ConnectionStatus {

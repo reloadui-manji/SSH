@@ -1,40 +1,28 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'fs';
 import { SshConnection } from './connection';
+import { OpenSshConnection } from './openSshConnection';
+import { profileHasCertificate, selectConnectionBackend } from './backendSelector';
+import type { RemoteConnection } from './remoteConnection';
 import { ConnectionProfile, ConnectionStatus, Protocol } from './protocol';
-import { SshConfigParserImpl } from './sshConfigParser';
 import { Logger } from '../utils/logger';
 
 export class ConnectionManager {
-  private readonly connections = new Map<string, SshConnection>();
+  private readonly connections = new Map<string, RemoteConnection>();
   private readonly profiles = new Map<string, ConnectionProfile>();
-  private readonly configParser: SshConfigParserImpl;
-  private configWatcher: vscode.FileSystemWatcher | null = null;
 
   onProfilesChanged: vscode.EventEmitter<void> = new vscode.EventEmitter<void>();
   onConnectionStatusChanged: vscode.EventEmitter<{ id: string; status: ConnectionStatus }> = new vscode.EventEmitter();
 
-  constructor(private readonly logger: Logger) {
-    this.configParser = new SshConfigParserImpl(this.logger);
-  }
+  constructor(private readonly logger: Logger) {}
 
   async initialize(): Promise<void> {
-    const configPath = vscode.workspace.getConfiguration('ssh').get<string>('configPath', '~/.ssh/config');
-    const resolvedPath = this.resolvePath(configPath);
-
-    this.loadFromSshConfig(resolvedPath);
     this.loadFromSettings();
-    this.watchSshConfig(resolvedPath);
     this.watchSettings();
   }
 
   reload(): void {
-    const configPath = vscode.workspace.getConfiguration('ssh').get<string>('configPath', '~/.ssh/config');
-    const resolvedPath = this.resolvePath(configPath);
-
     this.profiles.clear();
-    this.loadFromSshConfig(resolvedPath);
     this.loadFromSettings();
     this.logger.info('Connection profiles reloaded');
   }
@@ -47,11 +35,11 @@ export class ConnectionManager {
     return Array.from(this.profiles.values());
   }
 
-  getConnection(id: string): SshConnection | undefined {
+  getConnection(id: string): RemoteConnection | undefined {
     return this.connections.get(id);
   }
 
-  async connect(profileId: string): Promise<SshConnection> {
+  async connect(profileId: string): Promise<RemoteConnection> {
     const profile = this.profiles.get(profileId);
     if (!profile) {
       throw new Error(`Profile not found: ${profileId}`);
@@ -62,17 +50,32 @@ export class ConnectionManager {
       return existing;
     }
 
-    const conn = new SshConnection(profile, this.logger);
+    const hasCertificate = profileHasCertificate(profile, fs.existsSync);
+    const backend = selectConnectionBackend(profile, fs.existsSync);
+    const conn = backend === 'openssh'
+      ? new OpenSshConnection(profile, this.logger)
+      : new SshConnection(profile, this.logger);
+    this.logger.info(
+      `Selected ${backend} backend for ${profile.name} ` +
+      `(profile backend: ${profile.backend || 'auto'}, certificate detected: ${hasCertificate})`,
+    );
+    if (backend === 'openssh' && !hasCertificate) {
+      this.logger.warn(
+        `OpenSSH backend selected for ${profile.name} but no SSH certificate was detected. ` +
+        `Set ssh.defaultBackend/profile backend to "auto" or "ssh2" if this is a normal private-key connection.`,
+      );
+    }
 
-    conn.onStatusChange = (status) => {
+    conn.onStatusChange = (status: ConnectionStatus) => {
       this.onConnectionStatusChanged.fire({ id: profileId, status });
     };
     conn.onDisconnected = () => {
+      this.connections.delete(profileId);
       this.onConnectionStatusChanged.fire({ id: profileId, status: ConnectionStatus.Disconnected });
     };
 
-    await conn.connect();
     this.connections.set(profileId, conn);
+    await conn.connect();
     return conn;
   }
 
@@ -80,7 +83,6 @@ export class ConnectionManager {
     const conn = this.connections.get(profileId);
     if (conn) {
       await conn.disconnect();
-      this.connections.delete(profileId);
     }
   }
 
@@ -89,21 +91,11 @@ export class ConnectionManager {
     await Promise.allSettled(promises);
   }
 
-  private loadFromSshConfig(configPath: string): void {
-    try {
-      const profiles = this.configParser.parseFile(configPath);
-      for (const profile of profiles) {
-        this.profiles.set(profile.id, profile);
-      }
-      this.onProfilesChanged.fire();
-    } catch (err) {
-      this.logger.error(`Failed to load SSH config: ${err}`);
-    }
-  }
-
   private loadFromSettings(): void {
     const connections = vscode.workspace.getConfiguration('ssh').get<Array<Partial<ConnectionProfile>>>('connections', []);
     const defaultProtocol = vscode.workspace.getConfiguration('ssh').get<string>('defaultProtocol', 'sftp') as Protocol;
+    const defaultRemotePath = vscode.workspace.getConfiguration('ssh').get<string>('remotePath', '');
+    const defaultBackend = vscode.workspace.getConfiguration('ssh').get<'auto' | 'ssh2' | 'openssh'>('defaultBackend', 'auto');
 
     for (const conn of connections) {
       if (!conn.host || !conn.username) continue;
@@ -117,9 +109,12 @@ export class ConnectionManager {
         username: conn.username,
         protocol: conn.protocol || defaultProtocol,
         auth: conn.auth || { type: 'privateKey' },
-        remotePath: conn.remotePath,
+        backend: conn.backend || defaultBackend,
+        remotePath: conn.remotePath || defaultRemotePath,
         localPath: conn.localPath,
         connectTimeout: conn.connectTimeout,
+        keepaliveInterval: conn.keepaliveInterval,
+        concurrency: conn.concurrency,
         source: 'manual',
       };
 
@@ -131,44 +126,16 @@ export class ConnectionManager {
     }
   }
 
-  private watchSshConfig(configPath: string): void {
-    const resolvedPath = this.resolvePath(configPath);
-    const dir = path.dirname(resolvedPath);
-    const base = path.basename(resolvedPath);
-
-    this.configWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(dir, base),
-    );
-
-    this.configWatcher.onDidChange(() => {
-      this.logger.info('SSH config changed, reloading...');
-      this.reload();
-    });
-
-    this.configWatcher.onDidCreate(() => {
-      this.logger.info('SSH config created, loading...');
-      this.reload();
-    });
-  }
-
   private watchSettings(): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('ssh.connections')) {
+      if (e.affectsConfiguration('ssh')) {
         this.logger.info('SSH settings changed, reloading profiles...');
         this.reload();
       }
     });
   }
 
-  private resolvePath(p: string): string {
-    if (p.startsWith('~')) {
-      return path.join(os.homedir(), p.slice(1));
-    }
-    return p;
-  }
-
   dispose(): void {
-    this.configWatcher?.dispose();
     this.onProfilesChanged.dispose();
     this.onConnectionStatusChanged.dispose();
   }
