@@ -1,7 +1,7 @@
 import assert from 'assert';
 import * as os from 'os';
 import * as path from 'path';
-import { buildOpenSshPtyOptions } from '../../src/core/openSshPty';
+import { buildOpenSshPtyOptions, resolveTerminalPasswordResponse } from '../../src/core/openSshPty';
 import { ConnectionProfile, Protocol } from '../../src/core/protocol';
 
 function profile(): ConnectionProfile {
@@ -41,6 +41,15 @@ suite('OpenSSH PTY', () => {
     assert.deepStrictEqual(options.args.slice(1, 3), ['-F', '/dev/null']);
   });
 
+  test('does not pass terminal dimensions as unsupported ssh config options', () => {
+    const options = buildOpenSshPtyOptions(profile(), { columns: 80, rows: 24 });
+
+    assert.ok(!options.args.includes('-o Columns=80'));
+    assert.ok(!options.args.includes('Columns=80'));
+    assert.ok(!options.args.includes('-o Rows=24'));
+    assert.ok(!options.args.includes('Rows=24'));
+  });
+
   test('does not pass the private key path as CertificateFile', () => {
     const p = profile();
     p.auth = {
@@ -52,5 +61,17 @@ suite('OpenSSH PTY', () => {
     const options = buildOpenSshPtyOptions(p, { columns: 80, rows: 24 });
 
     assert.ok(!options.args.includes('CertificateFile=/tmp/id_ed25519'));
+  });
+
+  test('responds to password prompt with stored password for password auth', () => {
+    const p = profile();
+    p.auth = {
+      type: 'password',
+      password: 's3cr3t',
+    };
+
+    const response = resolveTerminalPasswordResponse(p, "root@example.com's password:");
+
+    assert.strictEqual(response, 's3cr3t\n');
   });
 });

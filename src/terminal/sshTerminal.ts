@@ -4,6 +4,7 @@ import { ConnectionStatus } from '../core/protocol';
 import { buildSshArgs, toCliArgs } from '../core/openSshArgs';
 import { profileHasCertificate } from '../core/backendSelector';
 import { Logger } from '../utils/logger';
+import { createPasswordAskpass, PasswordAskpass } from './passwordAskpass';
 import * as fs from 'fs';
 
 export function registerTerminalCommands(
@@ -13,6 +14,7 @@ export function registerTerminalCommands(
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('ssh.openTerminal', async (item?) => {
+      let askpass: PasswordAskpass | undefined;
       try {
         const profileId = item?.profile?.id;
         if (!profileId) {
@@ -29,22 +31,35 @@ export function registerTerminalCommands(
           await connectionManager.connect(profileId);
         }
 
-        // Build ssh args from profile (consistent with openSshConnection)
+        if (profile.auth.type === 'password' && profile.auth.password) {
+          askpass = createPasswordAskpass(profile.auth.password);
+        }
+
         const certPath = profileHasCertificate(profile, fs.existsSync) || undefined;
         const sshArgs = buildSshArgs(profile, { certificateFile: certPath });
-        const cliArgs = toCliArgs(sshArgs);
-        // Insert -t right after -F /dev/null for pseudo-terminal
-        const args = ['-t', ...cliArgs];
+        const args = ['-t', ...toCliArgs(sshArgs)];
 
         const terminal = vscode.window.createTerminal({
           name: `SSH: ${profile.name}`,
           shellPath: 'ssh',
           shellArgs: args,
+          env: askpass?.env,
         });
+
+        if (askpass) {
+          const disposable = vscode.window.onDidCloseTerminal((closedTerminal) => {
+            if (closedTerminal === terminal) {
+              askpass?.cleanup();
+              disposable.dispose();
+            }
+          });
+          context.subscriptions.push(disposable);
+        }
 
         terminal.show();
         logger.info(`Opened SSH terminal for ${profile.name}`);
       } catch (err) {
+        askpass?.cleanup();
         vscode.window.showErrorMessage(`Failed to open terminal: ${err}`);
       }
     }),

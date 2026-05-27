@@ -2,7 +2,7 @@
   "name": "ssh-sftp-fs",
   "displayName": "SSH/SFTP Remote Explorer",
   "description": "SSH/SFTP file browser, editor, sync and terminal integration for VS Code",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "manji",
   "engines": {
     "vscode": "^1.96.0"
